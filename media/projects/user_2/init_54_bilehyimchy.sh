@@ -1,3 +1,8 @@
+#!/bin/bash
+PROJECT_DIR="Django-Init-Automation"
+APP_NAME="bilehyimchy"      # Used in API URL
+MODELS_DATA="api_project:id,project_name,date_creation,date_modification,framework_id,user_id,script_file,zip_file,tables;api_framework:id,name,logo,short_description,date_creation,date_modification,type"    # Model name with fields
+
 # Step 1: Clone the repository if not exists
 if [ ! -d "$PROJECT_DIR" ]; then
     echo "Cloning Django project template..."

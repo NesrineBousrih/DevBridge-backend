@@ -1,3 +1,8 @@
+#!/bin/bash
+PROJECT_DIR="Django-Init-Automation"
+APP_NAME="dna"      # Used in API URL
+MODELS_DATA="deepgoplus:name"    # Model name
+
 # Step 1: Clone the repository if not exists
 if [ ! -d "$PROJECT_DIR" ]; then
     echo "Cloning Django project template..."

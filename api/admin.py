@@ -1,16 +1,16 @@
 from django.contrib import admin
-from .models import Framework, Project,Field
-class FieldInline(admin.StackedInline):
-    model = Field
-    extra = 1
-    fields = ('name', 'field_type')
+from .models import Framework, Project
+
 
 class ProjectAdmin(admin.ModelAdmin):
-    list_display = ('project_name', 'model_name', 'framework', 'user', 'date_creation', 'date_modification')
+    # Update list_display to use tables instead of model_name
+    list_display = ('project_name', 'tables', 'framework', 'user', 'date_creation', 'date_modification')
     list_filter = ('framework', 'date_creation')
-    search_fields = ('project_name', 'model_name')
+    # Update search_fields as well
+    search_fields = ('project_name',)
     readonly_fields = ('date_creation', 'date_modification')
-    inlines = [FieldInline]
+    # Add a method to display selected tables in admin
+  
 
 admin.site.register(Framework)
-admin.site.register(Project,ProjectAdmin)
+admin.site.register(Project, ProjectAdmin)

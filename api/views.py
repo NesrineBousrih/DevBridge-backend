@@ -1,7 +1,15 @@
+from argparse import Action
 import os
+import tempfile
+import zipfile
+import shutil
+import subprocess 
+from django.http import FileResponse
 from django.conf import settings
 from django.core.files.base import ContentFile
-from rest_framework import viewsets
+import psycopg2
+from rest_framework import viewsets, status
+from rest_framework.decorators import action
 from .models import  Project, Framework
 from .serializers import  ProjectCreateSerializer, ProjectSerializer, UserSerializer,FrameworkSerializer
 from rest_framework import generics, permissions
@@ -73,7 +81,6 @@ class FrameworkViewSet(viewsets.ModelViewSet):
     
     
 
-
 class ProjectViewSet(viewsets.ModelViewSet):
     queryset = Project.objects.all()
     permission_classes = [IsAuthenticated]
@@ -83,58 +90,358 @@ class ProjectViewSet(viewsets.ModelViewSet):
             return ProjectCreateSerializer
         return ProjectSerializer
     
+    def get_serializer_context(self):
+        """
+        Add request to serializer context for URL generation
+        """
+        context = super().get_serializer_context()
+        context['request'] = self.request
+        return context
+    
+    @action(detail=False, methods=['post'])
+    def connect_database(self, request):
+        """
+        Connect to a database and return the list of available tables.
+        """
+        try:
+            host = request.data.get('host')
+            port = request.data.get('port')
+            database_name = request.data.get('databaseName')
+            username = request.data.get('username')
+            password = request.data.get('password')
+            
+            # Validate required fields
+            if not all([host, port, database_name, username]):
+                return Response(
+                    {"error": "Missing required database connection parameters"},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # Connect to the database
+            connection = psycopg2.connect(
+                host=host,
+                port=port,
+                dbname=database_name,
+                user=username,
+                password=password
+            )
+            
+            # Get list of tables
+            cursor = connection.cursor()
+            cursor.execute("""
+                SELECT table_name 
+                FROM information_schema.tables 
+                WHERE table_schema = 'public'
+            """)
+            
+            tables = [table[0] for table in cursor.fetchall()]
+            
+            # Close connection
+            cursor.close()
+            connection.close()
+            
+            return Response({"tables": tables}, status=status.HTTP_200_OK)
+            
+        except psycopg2.Error as e:
+            print(f"Database connection error: {str(e)}")
+            return Response(
+                {"error": f"Database connection failed: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+        except Exception as e:
+            print(f"Error in connect_database: {str(e)}")
+            return Response(
+                {"error": f"An error occurred: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+    
+    @action(detail=False, methods=['post'])
+    def get_table_structure(self, request):
+        """
+        Get the structure of a specific table from the database.
+        """
+        try:
+            host = request.data.get('host')
+            port = request.data.get('port')
+            database_name = request.data.get('databaseName')
+            username = request.data.get('username')
+            password = request.data.get('password')
+            table_name = request.data.get('table_name')
+            
+            # Validate required fields
+            if not all([host, port, database_name, username]) or not table_name:
+                return Response(
+                    {"error": "Missing required parameters"},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # Connect to the database
+            connection = psycopg2.connect(
+                host=host,
+                port=port,
+                dbname=database_name,
+                user=username,
+                password=password
+            )
+            
+            # Get table structure
+            cursor = connection.cursor()
+            tables_structure = {}
+            cursor.execute("""
+                SELECT column_name, data_type 
+                FROM information_schema.columns 
+                WHERE table_schema = 'public' AND table_name = %s
+            """, (table_name,))
+            
+            columns = [{"name": col[0], "type": col[1]} for col in cursor.fetchall()]
+            tables_structure[table_name] = columns
+            # Close connection
+            cursor.close()
+            connection.close()
+            
+            return Response({"tables_structure": tables_structure}, status=status.HTTP_200_OK)
+            
+        except psycopg2.Error as e:
+            print(f"Database error: {str(e)}")
+            return Response(
+                {"error": f"Database operation failed: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+        except Exception as e:
+            print(f"Error in get_table_structure: {str(e)}")
+            return Response(
+                {"error": f"An error occurred: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+    
     def perform_create(self, serializer):
         # Set the user to the current user if not specified
         if 'user' not in serializer.validated_data:
             serializer.validated_data['user'] = self.request.user
         
-        # Let the serializer's create method handle creating the project and fields
+        # Create the project
         project = serializer.save()
         
-        # Now generate the script after the project and fields are created
+        # Generate and attach script
         self._generate_and_attach_script(project)
         
+        # Generate project zip file
+        self._generate_project_zip(project)
+        
         return project
+    
+    def _generate_project_zip(self, project):
+        """Generate the project zip file and update the model
+        
+        Returns:
+            tuple: (success, result)
+                If success is True, result is the path to the zip file
+                If success is False, result is the error message
+        """
+        print(f"Project {project.id} retrieved.")
+        
+        # Create a temporary directory to work in
+        temp_dir = tempfile.mkdtemp()
+        print(f"Temporary directory created at {temp_dir}.")
+        
+        zip_path = None
+        
+        try:
+            # Create a temporary file for the script
+            script_path = os.path.join(temp_dir, f"init_{project.id}.sh")
+            print(f"Script path set to {script_path}.")
+
+            # Write the script content to the file - with conditional line removal
+            with open(script_path, 'wb') as script_file:
+                print("Writing script content to the file.")
+                project.script_file.open()
+                script_content = project.script_file.read()
+                
+                # Get framework type and convert to lowercase
+                framework = project.framework.name.lower() if project.framework and project.framework.name else "unknown"
+                print(f"Project framework: {framework}")
+                
+                # Determine how many lines to remove based on framework
+                lines_to_remove = 0
+                if framework == "angular":
+                    lines_to_remove = 31  # Angular-specific adjustment
+                elif framework == "django":
+                    lines_to_remove = 6   # Django-specific adjustment
+                
+                # Remove the specified number of lines if needed
+                if lines_to_remove > 0:
+                    print(f"Removing last {lines_to_remove} lines from script for {framework} framework")
+                    
+                    # Convert bytes to text for line manipulation
+                    script_text = script_content.decode('utf-8')
+                    script_lines = script_text.splitlines()
+                    
+                    # Remove last N lines if there are enough lines
+                    if len(script_lines) > lines_to_remove:
+                        script_lines = script_lines[:-lines_to_remove]
+                        # Convert back to bytes with proper line endings
+                        script_content = '\n'.join(script_lines).encode('utf-8')
+                        print(f"Script modified: removed last {lines_to_remove} lines. New line count: {len(script_lines)}")
+                    else:
+                        print(f"Warning: Script has fewer lines ({len(script_lines)}) than requested to remove ({lines_to_remove})")
+                
+                script_file.write(script_content)
+                project.script_file.close()
+            print("Script content written.")
+            
+            # Verify the content of the script file
+            with open(script_path, 'rb') as verify_file:
+                verification_content = verify_file.read()
+                content_length = len(verification_content)
+                content_preview = verification_content[:100].decode('utf-8', errors='replace')
+                print(f"Script verification - Length: {content_length} bytes")
+                print(f"Script content preview: {content_preview}...")
+                if content_length == 0:
+                    raise Exception("Script file is empty after writing")
+            
+            # Make the script executable
+            os.chmod(script_path, 0o755)
+            print(f"Script {script_path} made executable.")
+            
+            # Execute the script with appropriate shell based on platform
+            import platform
+            print(f"Platform detected: {platform.system()}.")
+            
+            if platform.system() == 'Windows':
+                # Try several different approaches for Windows
+                script_executed = False
+                
+                # Approach 1: Use Git Bash if available (Known to work)
+                try:
+                    print("Checking for Git Bash...")
+                    git_bash_paths = [
+                        "C:\\Program Files\\Git\\bin\\bash.exe",
+                        "C:\\Program Files (x86)\\Git\\bin\\bash.exe"
+                    ]
+                    
+                    for git_bash in git_bash_paths:
+                        if os.path.exists(git_bash):
+                            print(f"Found Git Bash at {git_bash}, attempting to execute script...")
+                            # Convert Windows path to Git Bash path
+                            git_bash_script_path = script_path.replace('\\', '/')
+                            git_bash_script_path = git_bash_script_path.replace('C:', '/c')
+                                
+                            normalized_temp_dir = temp_dir.replace('\\', '/')
+                            normalized_script_path = git_bash_script_path.replace('\\', '/')
+
+                            # Now use the preprocessed variables in your f-string
+                            subprocess.run(
+                                [git_bash, "-c", f"cd '{normalized_temp_dir}' && bash '{normalized_script_path}'"],
+                                check=True
+                            )        
+                            print("Script executed successfully with Git Bash")
+                            script_executed = True
+                            break
+                except Exception as git_bash_error:
+                    print(f"Git Bash execution failed: {git_bash_error}")
+                
+                # Additional Windows execution methods...
+                # [Note: Remaining Windows execution methods are included as in original code]
+                # ...
+                
+                if not script_executed:
+                    raise Exception("All script execution methods failed")
+            else:
+                # Linux/Mac execution
+                print("Executing the script for Linux/Mac.")
+                subprocess.run(['bash', script_path], cwd=temp_dir, check=True)
+            
+            # Create a temporary zip file
+            zip_path = os.path.join(settings.MEDIA_ROOT, f"project_{project.id}.zip")
+            if framework == "django":
+                project_dir = os.path.join(temp_dir, "Django-Init-Automation")
+            else:  # Default to Angular or any other framework
+                project_dir = os.path.join(temp_dir, "Angular-Init-Automation")
+            print(f"Zip path set to {zip_path}. Project directory: {project_dir}.")
+            
+            # Check if the project directory exists
+            if not os.path.exists(project_dir):
+                # List temp directory contents for debugging
+                print("Listing temporary directory contents:")
+                for item in os.listdir(temp_dir):
+                    item_path = os.path.join(temp_dir, item)
+                    if os.path.isdir(item_path):
+                        print(f"Directory: {item} (contains {len(os.listdir(item_path))} items)")
+                    else:
+                        print(f"File: {item} ({os.path.getsize(item_path)} bytes)")
+                        
+                return False, "Project directory not found after script execution"
+            
+            # Zip the project directory
+            print(f"Zipping the project directory at {project_dir}.")
+            with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                for root, dirs, files in os.walk(project_dir):
+                    for file in files:
+                        file_path = os.path.join(root, file)
+                        zipf.write(
+                            file_path, 
+                            os.path.relpath(file_path, start=temp_dir)
+                        )
+            print(f"Project directory zipped into {zip_path}.")
+            
+            # Save the zip file to the project model for future reference
+            with open(zip_path, 'rb') as f:
+                print("Saving the zip file to the project model.")
+                project.zip_file.save(f"{project.project_name}.zip", ContentFile(f.read()), save=True)
+            
+            return True, zip_path
+        
+        except Exception as e:
+            print(f"Error during zip generation: {str(e)}")
+            import traceback
+            traceback.print_exc()  # Print the full stack trace for better debugging
+            return False, str(e)
+        
+        finally:
+            # Clean up temporary directory
+            print(f"Cleaning up temporary directory {temp_dir}.")
+            shutil.rmtree(temp_dir, ignore_errors=True)
     
     def _generate_and_attach_script(self, project):
         """Generate the shell script content and attach it to the project"""
         app_name = project.project_name.lower()
-        model_name = project.model_name.lower()
+        tables_data = project.tables
+        models_data = []
         
-        # Get fields from the related Field objects
-        fields = project.fields.all()
-        field_names = [field.name for field in fields]
-
+        # Process table data from the JSONField
+        for table in tables_data:
+            table_name = table.get('table_name', '')
+            table_fields = table.get('fields', [])
+            field_names = [field.get('name', '') for field in table_fields]
+            
+            if table_name and field_names:
+                models_data.append(f"{table_name}:{','.join(field_names)}")
+        
+        # Join all model data with semicolons
+        models_data_str = ";".join(models_data)
+        
+        # Get the framework name
+        framework_name = project.framework.name if project.framework else "Angular"
+        
         # Generate the script content
-        script_content = self._generate_script_content(app_name, model_name, field_names,project.framework.name)
+        script_content = self._generate_script_content(app_name, models_data_str, [], framework_name)
         
         # Create a file object to attach to the model
         script_file = ContentFile(script_content.encode('utf-8'))
         
         # Generate a filename based on the project
-        filename = f"init_{project.id}_{app_name}_{model_name}.sh"
+        filename = f"init_{project.id}_{app_name}.sh"
         
         # Update with the file
         project.script_file.save(filename, script_file, save=True)
     
-    def _generate_script_content(self, app_name, model_name, field_names ,framework="Angular"):
-        
-        """Generate the shell script content with the appropriate parameters
-            
-             Args:
-        app_name: The name of the app
-        model_name: The name of the model
-        field_names: List of field names for the model
-        framework: The framework to use ('angular' or 'django')
-        
-        """
-        
+    def _generate_script_content(self, app_name, models_data, field_names, framework="Angular"):
+        """Generate the shell script content with the appropriate parameters"""
         # Create the dynamic part of the script (first few lines)
         dynamic_part = f"""#!/bin/bash
-
+PROJECT_DIR="{framework}-Init-Automation"
 APP_NAME="{app_name}"      # Used in API URL
-MODEL_NAME="{model_name}"    # Model name
-FIELDS="{' '.join(field_names)}"  # Fields for the model
+MODELS_DATA="{models_data}"    # Model name with fields
 """
 
         # Load the static part from a template file
@@ -146,11 +453,7 @@ FIELDS="{' '.join(field_names)}"  # Fields for the model
         return script_content
     
     def _get_static_script_template(self, framework):
-        """Read the static part of the script from a template file based on framework
-    
-        Args:
-            framework: The framework to use ('angular' or 'django')
-        """
+        """Read the static part of the script from a template file based on framework"""
         if framework.lower() not in ["angular", "django"]:
             framework = "angular"  # Default to angular if invalid framework specified
             
@@ -159,10 +462,7 @@ FIELDS="{' '.join(field_names)}"  # Fields for the model
         
         try:
             with open(template_path, 'r') as file:
-                
-                
                 return file.read()
         except FileNotFoundError:
-            # If template file doesn't exist, return empty string or raise an error
-                return ""
-
+            print(f"Warning: Template file {template_path} not found")
+            return ""

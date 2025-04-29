@@ -1,3 +1,8 @@
+#!/bin/bash
+PROJECT_DIR="Django-Init-Automation"
+APP_NAME="devbridge"      # Used in API URL
+MODELS_DATA="test:name"    # Model name
+
 # Step 1: Clone the repository if not exists
 if [ ! -d "$PROJECT_DIR" ]; then
     echo "Cloning Django project template..."
