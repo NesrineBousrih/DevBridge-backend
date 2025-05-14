@@ -10,62 +10,88 @@ from django.core.files.base import ContentFile
 import psycopg2
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
-from .models import  Project, Framework
+from .models import  Project, Framework , User
 from .serializers import  ProjectCreateSerializer, ProjectSerializer, UserSerializer,FrameworkSerializer
 from rest_framework import generics, permissions
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.authtoken.models import Token
 from django.contrib.auth import authenticate
-from django.contrib.auth.models import User
 from rest_framework.permissions import IsAuthenticated
-
+from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 class UserRegistrationView(generics.CreateAPIView):
     serializer_class = UserSerializer
     permission_classes = [permissions.AllowAny]
-
+    
     def create(self, request, *args, **kwargs):
         response = super().create(request, *args, **kwargs)
         user = User.objects.get(username=response.data['username'])
         token, created = Token.objects.get_or_create(user=user)
-        return Response({'token': token.key})
+        return Response({
+            'token': token.key,
+            'user_type': user.user_type
+        })
 
 class UserLoginView(APIView):
     permission_classes = [permissions.AllowAny]
-
+    
     def post(self, request):
         username = request.data.get('username')
         password = request.data.get('password')
-
+        
         if not username or not password:
             return Response({'error': 'Username and password required'}, status=400)
-
+        
         user = authenticate(username=username, password=password)
         if user:
             token, created = Token.objects.get_or_create(user=user)
-            return Response({'token': token.key})
+            return Response({
+                'token': token.key,
+                'user_type': user.user_type
+            })
         return Response({'error': 'Invalid credentials'}, status=401)
-    
     
 class UserViewSet(viewsets.ModelViewSet):
     queryset = User.objects.all()
     serializer_class = UserSerializer
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
     
-    def create(self, request, *args, **kwargs):
-        serializer = self.get_serializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        self.perform_create(serializer)
-        headers = self.get_success_headers(serializer.data)
-        return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)
+    @action(detail=False, methods=['get'], permission_classes=[IsAuthenticated])
+    def me(self, request):
+        """
+        Get the current user's profile based on their auth token
+        """
+        serializer = self.get_serializer(request.user)
+        return Response(serializer.data)
     
-    def update(self, request, *args, **kwargs):
-        partial = kwargs.pop('partial', False)
-        instance = self.get_object()
-        serializer = self.get_serializer(instance, data=request.data, partial=partial)
+    @action(detail=False, methods=['put', 'patch'], permission_classes=[IsAuthenticated])
+    def update_me(self, request):
+        """
+        Update the current user's profile
+        """
+        # Handle both FormData and JSON
+        if hasattr(request.data, 'dict'):
+            data = request.data.dict()
+        else:
+            data = request.data.copy()
+        
+        # Ensure current user is used for update
+      
+        
+        # Handle profile photo
+        profile_photo = data.pop('profile_photo', None)
+        if profile_photo:
+            data['profile_photo'] = profile_photo
+        
+        # Determine if it's a partial update
+        partial = request.method == 'PATCH'
+        
+        # Validate and update
+        serializer = self.get_serializer(request.user, data=data, partial=partial)
         serializer.is_valid(raise_exception=True)
         self.perform_update(serializer)
+        
         return Response(serializer.data)
-
 class FrameworkViewSet(viewsets.ModelViewSet):
     queryset = Framework.objects.all()
     serializer_class = FrameworkSerializer
@@ -82,7 +108,16 @@ class FrameworkViewSet(viewsets.ModelViewSet):
     
 
 class ProjectViewSet(viewsets.ModelViewSet):
-    queryset = Project.objects.all()
+    # Replace the generic queryset with a method that filters by user
+    def get_queryset(self):
+        """
+        Override get_queryset to return only the projects of the current user
+        For staff/admin users, return all projects
+        """
+        if self.request.user.is_staff:
+            return Project.objects.all()
+        return Project.objects.filter(user=self.request.user)
+    
     permission_classes = [IsAuthenticated]
     
     def get_serializer_class(self):
@@ -97,6 +132,201 @@ class ProjectViewSet(viewsets.ModelViewSet):
         context = super().get_serializer_context()
         context['request'] = self.request
         return context
+    
+    def perform_create(self, serializer):
+        # Always set the user to the current user
+        serializer.validated_data['user'] = self.request.user
+        
+        # Create the project
+        project = serializer.save()
+        
+        # Generate and attach script
+        self._generate_and_attach_script(project)
+        
+        # Generate project zip file
+        self._generate_project_zip(project)
+        
+        return project
+    
+    def update(self, request, *args, **kwargs):
+        """
+        Update the project and regenerate script and zip files
+        """
+        partial = kwargs.pop('partial', False)
+        instance = self.get_object()
+        
+        # Check if user has permission to modify this project
+        if instance.user != request.user and not request.user.is_staff:
+            return Response(
+                {"error": "You do not have permission to modify this project"},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        serializer = self.get_serializer(instance, data=request.data, partial=partial)
+        serializer.is_valid(raise_exception=True)
+        
+        # Save the updated project
+        project = self.perform_update(serializer)
+        
+        # Generate new script and zip files
+        self._generate_and_attach_script(project)
+        success, result = self._generate_project_zip(project)
+        
+        if not success:
+            return Response(
+                {"error": f"Project updated but failed to generate project files: {result}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+        
+        return Response(serializer.data)
+    
+    def perform_update(self, serializer):
+        return serializer.save()
+    
+    def destroy(self, request, *args, **kwargs):
+        """
+        Override destroy to check user permissions
+        """
+        instance = self.get_object()
+        
+        # Check if user has permission to delete this project
+        if instance.user != request.user and not request.user.is_staff:
+            return Response(
+                {"error": "You do not have permission to delete this project"},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        return super().destroy(request, *args, **kwargs)
+    
+    @action(detail=True, methods=['post'])
+    def update_tables(self, request, pk=None):
+        """
+        Add, update or delete tables in a project
+        """
+        project = self.get_object()
+        
+        # Check if user has permission to modify this project
+        if project.user != request.user:
+            return Response(
+                {"error": "You do not have permission to modify this project"},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        operation = request.data.get('operation')
+        table_data = request.data.get('table_data', {})
+        
+        # Validate operation
+        if operation not in ['add', 'update', 'delete']:
+            return Response(
+                {"error": "Invalid operation. Must be 'add', 'update', or 'delete'"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+            
+        # Get current tables
+        current_tables = project.tables
+        
+        if operation == 'add':
+            # Validate table data
+            if not table_data.get('table_name') or not table_data.get('fields'):
+                return Response(
+                    {"error": "Table name and fields are required for adding a table"},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+                
+            # Check if table name already exists
+            existing_table_names = [table.get('table_name') for table in current_tables]
+            if table_data.get('table_name') in existing_table_names:
+                return Response(
+                    {"error": f"A table with name '{table_data.get('table_name')}' already exists"},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+                
+            # Add new table
+            current_tables.append(table_data)
+            
+        elif operation == 'update':
+            # Validate table data
+            if not table_data.get('table_name'):
+                return Response(
+                    {"error": "Table name is required for updating a table"},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+                
+            # Find table by name
+            table_found = False
+            for i, table in enumerate(current_tables):
+                if table.get('table_name') == table_data.get('table_name'):
+                    # Update existing table
+                    current_tables[i] = table_data
+                    table_found = True
+                    break
+                    
+            if not table_found:
+                return Response(
+                    {"error": f"Table '{table_data.get('table_name')}' not found"},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+                
+        elif operation == 'delete':
+            # Validate table data
+            if not table_data.get('table_name'):
+                return Response(
+                    {"error": "Table name is required for deleting a table"},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+                
+            # Find and remove table by name
+            table_found = False
+            for i, table in enumerate(current_tables):
+                if table.get('table_name') == table_data.get('table_name'):
+                    # Remove the table
+                    current_tables.pop(i)
+                    table_found = True
+                    break
+                    
+            if not table_found:
+                return Response(
+                    {"error": f"Table '{table_data.get('table_name')}' not found"},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+        
+        # Update project with new tables
+        project.tables = current_tables
+        project.save()
+        
+        # Regenerate script and zip files
+        self._generate_and_attach_script(project)
+        success, result = self._generate_project_zip(project)
+        
+        if not success:
+            return Response(
+                {"error": f"Tables updated but failed to generate project files: {result}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+        
+        return Response(
+            {"message": f"Table successfully {operation}ed", "tables": project.tables},
+            status=status.HTTP_200_OK
+        )
+        
+    @action(detail=True, methods=['get'])
+    def download_project(self, request, pk=None):
+        """
+        Download the generated project zip file
+        """
+        project = self.get_object()
+        
+        if not project.zip_file:
+            return Response(
+                {"error": "No project files available for download"},
+                status=status.HTTP_404_NOT_FOUND
+            )
+            
+        return FileResponse(
+            project.zip_file.open('rb'),
+            as_attachment=True,
+            filename=f"{project.project_name}.zip"
+        )
     
     @action(detail=False, methods=['post'])
     def connect_database(self, request):
@@ -214,22 +444,6 @@ class ProjectViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
     
-    def perform_create(self, serializer):
-        # Set the user to the current user if not specified
-        if 'user' not in serializer.validated_data:
-            serializer.validated_data['user'] = self.request.user
-        
-        # Create the project
-        project = serializer.save()
-        
-        # Generate and attach script
-        self._generate_and_attach_script(project)
-        
-        # Generate project zip file
-        self._generate_project_zip(project)
-        
-        return project
-    
     def _generate_project_zip(self, project):
         """Generate the project zip file and update the model
         
@@ -264,7 +478,7 @@ class ProjectViewSet(viewsets.ModelViewSet):
                 # Determine how many lines to remove based on framework
                 lines_to_remove = 0
                 if framework == "angular":
-                    lines_to_remove = 31  # Angular-specific adjustment
+                    lines_to_remove = 6  # Angular-specific adjustment
                 elif framework == "django":
                     lines_to_remove = 6   # Django-specific adjustment
                 
@@ -466,3 +680,11 @@ MODELS_DATA="{models_data}"    # Model name with fields
         except FileNotFoundError:
             print(f"Warning: Template file {template_path} not found")
             return ""
+    @action(detail=False, methods=['get'])
+    def my_projects(self, request):
+        """
+        A dedicated endpoint to get all projects of the current user
+        """
+        queryset = self.get_queryset()
+        serializer = self.get_serializer(queryset, many=True)
+        return Response(serializer.data)        

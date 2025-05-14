@@ -1,9 +1,23 @@
 from django.db import models
 from django.forms import ValidationError
-from django.contrib.auth.models import User
+from django.contrib.auth.models import AbstractUser
 
-
+class User(AbstractUser):
+    USER_TYPE_CHOICES = (
+        ('admin', 'Admin'),
+        ('developer', 'Developer'),
+    )
     
+    user_type = models.CharField(
+        max_length=10,
+        choices=USER_TYPE_CHOICES,
+        default='developer'
+    )  
+    profile_photo = models.ImageField(
+        upload_to='profile_photos/',
+        null=True,
+        blank=True
+    ) 
 
 class Framework(models.Model):
     TYPE_CHOICES = (

@@ -1,36 +1,78 @@
 
 from rest_framework import serializers
-from .models import  Framework, Project
-from django.contrib.auth.models import User
+from .models import  Framework, Project, User
 
-        
 class UserSerializer(serializers.ModelSerializer):
-    password = serializers.CharField(write_only=True, required=True)
+    password = serializers.CharField(write_only=True, required=False)
+    current_password = serializers.CharField(write_only=True, required=False)
+    user_type = serializers.ChoiceField(choices=User.USER_TYPE_CHOICES, default='developer')
+    email = serializers.EmailField(required=True)
+    profile_photo = serializers.ImageField(required=False, allow_null=True)
 
     class Meta:
         model = User
-        fields = ('id', 'username', 'password')
+        fields = ('id', 'username', 'password', 'current_password', 'email', 'user_type', 'profile_photo')
         read_only_fields = ('id',)
 
+    def validate(self, data):
+        # If we're creating a new user, password must be provided
+        if self.instance is None and not data.get('password'):
+            raise serializers.ValidationError({'password': 'This field is required.'})
+        
+        # Check if new password is provided during update
+        if self.instance and data.get('password'):
+            # Validate current password when changing password
+            current_password = data.get('current_password')
+            if not current_password:
+                raise serializers.ValidationError({
+                    'current_password': 'Current password is required when changing password'
+                })
+            
+            # Check if current password is correct
+            if not self.instance.check_password(current_password):
+                raise serializers.ValidationError({
+                    'current_password': 'Current password is incorrect'
+                })
+        
+        return data
+
     def create(self, validated_data):
-        user = User.objects.create_user(
+        # Remove non-model fields
+        validated_data.pop('current_password', None)
+        
+        return User.objects.create_user(
             username=validated_data['username'],
-            password=validated_data['password']
+            email=validated_data['email'],
+            password=validated_data['password'],
+            user_type=validated_data.get('user_type', 'developer')
         )
-        return user
 
     def update(self, instance, validated_data):
-        # Update username if provided
-        if 'username' in validated_data:
-            instance.username = validated_data['username']
+        # Remove current_password from validated data
+        validated_data.pop('current_password', None)
         
-        # Update password if provided
-        if 'password' in validated_data:
-            instance.set_password(validated_data['password'])
-        
+        # Handle profile photo
+        profile_photo = validated_data.pop('profile_photo', None)
+        if profile_photo:
+            # Delete existing photo if it exists
+            if instance.profile_photo:
+                instance.profile_photo.delete()
+            
+            # Save new photo
+            instance.profile_photo = profile_photo
+
+        # Update username, email, and user type
+        instance.username = validated_data.get('username', instance.username)
+        instance.email = validated_data.get('email', instance.email)
+        instance.user_type = validated_data.get('user_type', instance.user_type)
+
+        # Only update the password if it's provided and not empty
+        password = validated_data.get('password')
+        if password:
+            instance.set_password(password)
+
         instance.save()
         return instance
-    
 class FrameworkSerializer(serializers.ModelSerializer):
     class Meta:
         model = Framework
