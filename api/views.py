@@ -76,12 +76,26 @@ class UserViewSet(viewsets.ModelViewSet):
             data = request.data.copy()
         
         # Ensure current user is used for update
-      
         
         # Handle profile photo
         profile_photo = data.pop('profile_photo', None)
         if profile_photo:
             data['profile_photo'] = profile_photo
+        
+        # Handle developer-specific fields explicitly
+        # These fields need to be specially handled for developer users
+        expertise = data.get('expertise', None)
+        experience_years = data.get('experience_years', None)
+        
+        # Convert experience_years to integer if it's provided
+        if experience_years and experience_years != '':
+            try:
+                data['experience_years'] = int(experience_years)
+            except (ValueError, TypeError):
+                return Response(
+                    {"detail": "Experience years must be a valid number"}, 
+                    status=status.HTTP_400_BAD_REQUEST
+                )
         
         # Determine if it's a partial update
         partial = request.method == 'PATCH'
@@ -92,6 +106,8 @@ class UserViewSet(viewsets.ModelViewSet):
         self.perform_update(serializer)
         
         return Response(serializer.data)
+    
+    
 class FrameworkViewSet(viewsets.ModelViewSet):
     queryset = Framework.objects.all()
     serializer_class = FrameworkSerializer

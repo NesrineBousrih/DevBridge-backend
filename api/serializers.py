@@ -11,7 +11,7 @@ class UserSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = User
-        fields = ('id', 'username', 'password', 'current_password', 'email', 'user_type', 'profile_photo')
+        fields = ('id', 'username', 'password', 'current_password', 'email', 'user_type', 'profile_photo','expertise', 'experience_years')
         read_only_fields = ('id',)
 
     def validate(self, data):
@@ -65,6 +65,8 @@ class UserSerializer(serializers.ModelSerializer):
         instance.username = validated_data.get('username', instance.username)
         instance.email = validated_data.get('email', instance.email)
         instance.user_type = validated_data.get('user_type', instance.user_type)
+        instance.expertise = validated_data.get('expertise', instance.expertise)
+        instance.experience_years = validated_data.get('experience_years', instance.experience_years)
 
         # Only update the password if it's provided and not empty
         password = validated_data.get('password')

@@ -1,7 +1,6 @@
 from django.db import models
 from django.forms import ValidationError
 from django.contrib.auth.models import AbstractUser
-
 class User(AbstractUser):
     USER_TYPE_CHOICES = (
         ('admin', 'Admin'),
@@ -17,8 +16,33 @@ class User(AbstractUser):
         upload_to='profile_photos/',
         null=True,
         blank=True
-    ) 
-
+    )
+    
+    # Developer-specific fields
+    expertise = models.CharField(
+        max_length=100,
+        null=True,
+        blank=True,
+        help_text='Primary area of technical expertise'
+    )
+    experience_years = models.PositiveIntegerField(
+        null=True, 
+        blank=True,
+        help_text='Years of development experience'
+    )
+    
+    def is_developer(self):
+        return self.user_type == 'developer'
+    
+    def get_developer_info(self):
+        """Return developer-specific information if the user is a developer"""
+        if not self.is_developer():
+            return None
+            
+        return {
+            'expertise': self.expertise,
+            'experience_years': self.experience_years,
+        }
 class Framework(models.Model):
     TYPE_CHOICES = (
         ('Frontend', 'Frontend'),

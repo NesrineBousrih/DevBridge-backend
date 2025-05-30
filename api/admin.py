@@ -20,7 +20,7 @@ admin.site.register(Project, ProjectAdmin)
 
 class CustomUserAdmin(UserAdmin):
     # Add user_type to the list display
-    list_display = ('username', 'email', 'first_name', 'last_name', 'user_type', 'is_staff')
+    list_display = ('username', 'email', 'first_name', 'last_name', 'user_type', 'is_staff', 'expertise', 'experience_years')
     
     # Add user_type to the fieldsets
     fieldsets = (
