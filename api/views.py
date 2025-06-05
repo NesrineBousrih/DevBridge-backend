@@ -4,7 +4,7 @@ import tempfile
 import zipfile
 import shutil
 import subprocess 
-from django.http import FileResponse
+from django.http import FileResponse, JsonResponse
 from django.conf import settings
 from django.core.files.base import ContentFile
 import psycopg2
@@ -19,6 +19,12 @@ from rest_framework.authtoken.models import Token
 from django.contrib.auth import authenticate
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
+from django.db.models import Count
+from django.views.decorators.csrf import csrf_exempt
+from django.utils.decorators import method_decorator
+from django.views import View
+from datetime import datetime, timedelta
+from collections import defaultdict
 class UserRegistrationView(generics.CreateAPIView):
     serializer_class = UserSerializer
     permission_classes = [permissions.AllowAny]
@@ -124,7 +130,7 @@ class FrameworkViewSet(viewsets.ModelViewSet):
     
 
 class ProjectViewSet(viewsets.ModelViewSet):
-    # Replace the generic queryset with a method that filters by user
+    
     def get_queryset(self):
         """
         Override get_queryset to return only the projects of the current user
@@ -703,4 +709,62 @@ MODELS_DATA="{models_data}"    # Model name with fields
         """
         queryset = self.get_queryset()
         serializer = self.get_serializer(queryset, many=True)
-        return Response(serializer.data)        
+        return Response(serializer.data)   
+from django.utils import timezone     
+class WeeklyActivityView(APIView):
+    def get(self, request, format=None):
+        today = timezone.now().date()
+        # Get projects for the last 7 days
+        seven_days_ago = today - timedelta(days=6)
+        
+        # Aggregate project counts by date
+        activity_data = Project.objects.filter(
+            date_creation__date__gte=seven_days_ago
+        ).extra(select={'day': 'date(date_creation)'}).values('day').annotate(count=Count('id')).order_by('day')
+
+        # Create a dictionary for easier lookup
+        activity_dict = {item['day'].strftime('%Y-%m-%d'): item['count'] for item in activity_data}
+
+        # Prepare labels and data for the last 7 days, filling in zeros for days without projects
+        labels = [(seven_days_ago + timedelta(days=i)).strftime('%Y-%m-%d') for i in range(7)]
+        data = [activity_dict.get(label, 0) for label in labels]
+
+        return Response({
+            'labels': labels,
+            'data': data
+        })
+
+class UsersOverviewView(APIView):
+    def get(self, request, format=None):
+        user_type_counts = User.objects.values('user_type').annotate(count=Count('id'))
+        
+        labels = [item['user_type'].capitalize() for item in user_type_counts]
+        data = [item['count'] for item in user_type_counts]
+        colors = [
+            'rgba(255, 99, 132, 0.6)',  # Admin
+            'rgba(54, 162, 235, 0.6)',  # Developer
+        ] # You can add more colors if you have more user types
+        
+        return Response({
+            'labels': labels,
+            'data': data,
+            'colors': colors
+        })
+
+class TechnologyDistributionView(APIView):
+    def get(self, request, format=None):
+        framework_counts = Project.objects.values('framework__name').annotate(count=Count('id')).order_by('-count')
+        
+        labels = [item['framework__name'] for item in framework_counts]
+        data = [item['count'] for item in framework_counts]
+        
+        return Response({
+            'labels': labels,
+            'data': data
+        })
+
+class RecentActivityView(APIView):
+    def get(self, request, format=None):
+        recent_projects = Project.objects.select_related('user', 'framework').order_by('-date_creation')[:5]  # Get the 5 most recent
+        serializer = ProjectSerializer(recent_projects, many=True)
+        return Response(serializer.data)
